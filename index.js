@@ -1,10 +1,11 @@
 import "dotenv/config";
 import express from "express";
-import { pool, initDb, consume, bodyDefault, installErrorHandlers } from "./common.js";
+import { pool, initDb, consume, bodyDefault, installErrorHandlers, authenticate, auditTrail } from "./common.js";
 
 const app = express();
 const PORT = process.env.PORT || 3004;
 
+app.disable("x-powered-by");
 app.use(express.json());
 app.use(bodyDefault);
 
@@ -55,11 +56,22 @@ app.get("/health", async (_, res) => {
   catch { res.status(503).json({ status: "down" }); }
 });
 
+// 2.7: todas las rutas (salvo / y /health) exigen una sesión válida (C1).
+// 2.8: registro de auditoría (va antes de authenticate para anotar también los 401).
+app.use(auditTrail("traceability", []));
+app.use(authenticate);
+
 app.get("/verify/:serial", async (req, res) => {
   const serial = req.params.serial;
   const r = await pool.query(
     "select * from custody_chain where serial_number=$1 order by timestamp desc, id desc", [serial]);
   if (!r.rowCount) return res.json({ serial, authentic: false, status: "no_registrado" });
+  // 2.7 (C3): una unidad es auténtica SOLO si tiene evento de fabricación. Antes
+  // bastaba con cualquier evento, así que un serial inventado que alguien
+  // "transfería" aparecía como auténtico.
+  if (!r.rows.some((e) => e.event_type === "fabricado")) {
+    return res.json({ serial, authentic: false, status: "no_registrado", suspicious: true, events: r.rows });
+  }
 
   let status = r.rows[0].event_type;
   const batchId = r.rows.find((e) => e.event_data?.batch?.id)?.event_data.batch.id || null;
