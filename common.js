@@ -265,7 +265,44 @@ export async function authenticate(req, res, next) {
 export const requireRole = (...roles) => (req, res, next) =>
   roles.includes(req.auth?.role) ? next() : jsonError(res, 403, "Tu rol no tiene permiso para esta acción");
 
-export const isAdmin = (req) => req.auth?.role === "admin";
+// 2.10: jerarquía de administración.
+//   isMaster: administrador general (ve toda la plataforma).
+//   isAdmin:  cualquier rol de administración (admin o master-admin). Un "admin" solo
+//             puede ver los datos de SU ámbito: usa getScope() antes de devolver nada.
+export const ADMIN_ROLES = ["master-admin", "admin"];
+export const isMaster = (req) => req.auth?.role === "master-admin";
+export const isAdmin = (req) => ADMIN_ROLES.includes(req.auth?.role);
+
+// Ámbito de datos del que llama, calculado por auth-service (GET /scope) con datos de la
+// base, nunca con lo que diga el cliente. Opcionalmente acotado a un administrador
+// (admin_id) o a un usuario (user_id): auth-service responde 403 si el que llama no
+// tiene acceso a ese ámbito. Caché corta por token+consulta.
+export class ScopeError extends Error { constructor(status, message) { super(message); this.status = status; } }
+const SCOPE_CACHE_MS = Number(process.env.SCOPE_CACHE_MS) || 10000;
+const scopeCache = new Map();
+export async function getScope(req, { adminId, userId } = {}) {
+  const qs = new URLSearchParams();
+  if (adminId !== undefined && adminId !== null && adminId !== "") qs.set("admin_id", String(adminId));
+  if (userId !== undefined && userId !== null && userId !== "") qs.set("user_id", String(userId));
+  const key = `${req.token.slice(-43)}?${qs}`;
+  const hit = scopeCache.get(key);
+  if (hit && hit.until > Date.now()) return hit.scope;
+  let r;
+  try {
+    r = await fetch(`${AUTH_URL}/scope${qs.size ? `?${qs}` : ""}`, { headers: { Authorization: `Bearer ${req.token}` }, signal: AbortSignal.timeout(SESSION_TIMEOUT_MS) });
+  } catch (e) {
+    console.error("[scope] auth-service no respondió:", e.message);
+    throw new ScopeError(503, "No se pudo comprobar tu ámbito de acceso. Intenta de nuevo en unos segundos.");
+  }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new ScopeError(r.status === 401 ? 401 : r.status === 404 ? 404 : r.status === 403 ? 403 : 503, data.error || "No tienes acceso a esa información");
+  const names = new Set((data.users || []).map((u) => normName(u.name)).filter(Boolean));
+  const scope = { ...data, names, has: (name) => data.all || names.has(normName(name)) };
+  if (scopeCache.size > 2000) scopeCache.clear();
+  scopeCache.set(key, { scope, until: Date.now() + SCOPE_CACHE_MS });
+  return scope;
+}
+const normName = (v) => String(v ?? "").trim().toLowerCase();
 // Compara nombres de entidad sin distinguir mayúsculas ni espacios sobrantes.
 export const sameEntity = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
 
