@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PORT: "3000"
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DB_NAME: ci_db
+      JWT_SECRET: ci-secret-not-for-production
+      RABBITMQ_URL: amqp://guest:guest@localhost:5672
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Syntax check
+        run: |
+          set -e
+          for f in $(git ls-files '*.js' '*.mjs'); do node --check "$f"; done
+      - name: Build image
+        run: docker build -t ci-service .
+      - name: Smoke test
+        run: |
+          set -e
+          docker run -d --name ci-service --network host \
+            -e PORT="$PORT" -e NODE_ENV="$NODE_ENV" \
+            -e DATABASE_URL="$DATABASE_URL" -e DB_NAME="$DB_NAME" \
+            -e JWT_SECRET="$JWT_SECRET" -e RABBITMQ_URL="$RABBITMQ_URL" \
+            ci-service
+          for i in $(seq 1 45); do
+            if curl -fsS "http://localhost:$PORT/health"; then echo; exit 0; fi
+            sleep 2
+          done
+          echo "::error::/health no respondio 200 en 90s"
+          docker logs ci-service
+          exit 1
