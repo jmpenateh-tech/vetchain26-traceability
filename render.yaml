@@ -1,4 +1,4 @@
-# Infraestructura como codigo (Render Blueprint).
+﻿# Infraestructura como codigo (Render Blueprint).
 # Los servicios actuales se crearon desde el dashboard: este archivo documenta la
 # configuracion esperada y permite recrear el servicio en otra cuenta/entorno.
 # No modifica el servicio existente hasta que se adopte explicitamente como Blueprint.
@@ -10,7 +10,7 @@ services:
     region: oregon
     branch: main
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    autoDeployTrigger: checksPass
     envVars:
       - key: NODE_ENV
         value: production
